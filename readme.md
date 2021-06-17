@@ -1,6 +1,6 @@
 Fast CSV Exporter
 
-Faster than navicat. Can used to export `mysql, sqlserver, postgres, sqlite` as csv file.
+Faster than navicat. Can used to export `mysql, sqlserver, postgres, sqlite` to csv file.
 
 Cmd params
 
