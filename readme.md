@@ -16,3 +16,5 @@ withHead|no|true or false. Default to `true`
 Example:
 
 `go run main.go -dialect mysql -tableName <tableName> -dsn "<username>:<password>@tcp(<host>:<port>)/<databaseName>?charset=utf8mb4&parseTime=True&loc=Local"`
+
+![Demo](img/demo.gif)
