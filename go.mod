@@ -4,7 +4,7 @@ go 1.15
 
 require (
 	github.com/gosuri/uilive v0.0.4 // indirect
-	github.com/gosuri/uiprogress v0.0.1 // indirect
+	github.com/gosuri/uiprogress v0.0.1
 	github.com/mattn/go-sqlite3 v1.14.7 // indirect
 	gorm.io/driver/mysql v1.1.0
 	gorm.io/driver/postgres v1.1.0
