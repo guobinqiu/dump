@@ -1,4 +1,4 @@
-module dump
+module github.com/guobinqiu/dump
 
 go 1.15
 
