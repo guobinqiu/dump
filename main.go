@@ -1,296 +1,365 @@
+// package main
+
+// import (
+// 	"encoding/csv"
+// 	"flag"
+// 	"fmt"
+// 	"github.com/gosuri/uiprogress"
+// 	"gorm.io/driver/mysql"
+// 	"gorm.io/driver/postgres"
+// 	"gorm.io/driver/sqlite"
+// 	"gorm.io/driver/sqlserver"
+// 	"gorm.io/gorm"
+// 	"gorm.io/gorm/logger"
+// 	"log"
+// 	"os"
+// 	"regexp"
+// 	"runtime"
+// 	"strconv"
+// 	"strings"
+// 	"sync"
+// 	"time"
+// )
+
+// var (
+// 	sharding    int
+// 	tableName   string
+// 	csvFileName string
+// 	dialect     string
+// 	dsn         string
+// 	withHead    bool
+// )
+
+// var mtx sync.RWMutex
+
+// func init() {
+// 	flag.IntVar(&sharding, "sharding", 1, "sharding count that may speed up export progress")
+// 	flag.StringVar(&tableName, "tableName", "", "table name")
+// 	flag.StringVar(&csvFileName, "csvFileName", "", "exported csv file name")
+// 	flag.StringVar(&dialect, "dialect", "", "db dialect(mysql, sqlserver, postgres, sqlite are supported for now)")
+// 	flag.StringVar(&dsn, "dsn", "", "db dsn")
+// 	flag.BoolVar(&withHead, "withHead", true, "with csv head")
+// }
+
+// func main() {
+// 	flag.Parse()
+// 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+// 	var totalCount int
+// 	db := getDB()
+// 	db.Raw(fmt.Sprintf("select count(*) from %s", tableName)).Scan(&totalCount)
+
+// 	checkCmdParams(totalCount)
+
+// 	f, err := os.OpenFile(csvFileName, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+// 	defer func() {
+// 		f.Close()
+// 		sqlDB, _ := db.DB()
+// 		sqlDB.Close()
+// 	}()
+
+// 	if isOldVersionSqlserver(db) {
+// 		sharding = 1
+// 	}
+
+// 	var wg = new(sync.WaitGroup)
+// 	wg.Add(sharding)
+
+// 	uiprogress.Start()
+
+// 	//100 =>33,33,34 =>0-32,33-65,66-99
+// 	shardingSize := totalCount / sharding
+// 	for i := 0; i < sharding; i++ {
+// 		min := i * shardingSize
+// 		max := min + shardingSize - 1
+// 		if i == sharding-1 {
+// 			max = totalCount - 1
+// 		}
+
+// 		go func(i int) {
+// 			t := NewExportThread(f, db, min, max, wg, fmt.Sprintf("thread-%d", i))
+// 			t.WriteCSV()
+// 		}(i)
+// 	}
+
+// 	wg.Wait()
+// 	uiprogress.Stop()
+// }
+
+// type ExportThread struct {
+// 	w          *csv.Writer
+// 	db         *gorm.DB
+// 	min        int
+// 	max        int
+// 	wg         *sync.WaitGroup
+// 	threadName string
+// }
+
+// func NewExportThread(f *os.File, db *gorm.DB, min int, max int, wg *sync.WaitGroup, threadName string) *ExportThread {
+// 	return &ExportThread{csv.NewWriter(f), db, min, max, wg, threadName}
+// }
+
+// func (t *ExportThread) WriteCSV() error {
+// 	defer t.wg.Done()
+
+// 	db := t.db.Table(tableName)
+// 	if !isOldVersionSqlserver(db) {
+// 		db = db.Offset(t.min).Limit(t.max - t.min + 1)
+// 	}
+
+// 	rows, err := db.Rows()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	mtx.Lock()
+// 	if withHead {
+// 		columns, err := rows.Columns()
+// 		if err != nil {
+// 			return err
+// 		}
+// 		if err := t.w.Write(columns); err != nil {
+// 			return err
+// 		}
+// 		t.w.Flush()
+// 		withHead = false
+// 	}
+// 	mtx.Unlock()
+
+// 	defer func() {
+// 		rows.Close()
+// 	}()
+
+// 	columns, err := rows.Columns()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	//values := make([]interface{}, len(columns))
+// 	//
+// 	//for i := range values {
+// 	//	var a string
+// 	//	values[i] = &a
+// 	//}
+// 	//
+// 	//i := 1
+// 	//
+// 	//for rows.Next() {
+// 	//	record := make([]string, len(columns))
+// 	//	rows.Scan(values...)
+// 	//
+// 	//	for i, value := range values {
+// 	//		record[i] = *value.(*string)
+// 	//	}
+// 	//
+// 	//	t.w.Write(record)
+// 	//
+// 	//	if i%1000 == 0 {
+// 	//		t.w.Flush()
+// 	//	}
+// 	//	i++
+// 	//}
+
+// 	rawResult := make([][]byte, len(columns))
+// 	result := make([]string, len(columns))
+
+// 	dest := make([]interface{}, len(columns))
+// 	for i := range rawResult {
+// 		dest[i] = &rawResult[i]
+// 	}
+
+// 	total := t.max - t.min + 1
+// 	bar := uiprogress.AddBar(total).AppendCompleted().PrependElapsed()
+// 	bar.PrependFunc(func(b *uiprogress.Bar) string {
+// 		return fmt.Sprintf("[%s] (%d/%d)", t.threadName, b.Current(), total)
+// 	})
+
+// 	for i := 1; rows.Next(); i++ {
+// 		rows.Scan(dest...)
+// 		for i, raw := range rawResult {
+// 			if raw == nil {
+// 				result[i] = ""
+// 			} else {
+// 				result[i] = string(raw)
+// 			}
+// 		}
+// 		t.w.Write(result)
+// 		bar.Incr()
+
+// 		if i%1000 == 0 {
+// 			t.w.Flush()
+// 			if err := t.w.Error(); err != nil {
+// 				log.Fatal(err)
+// 			}
+// 		}
+// 	}
+
+// 	defer func() {
+// 		t.w.Flush()
+// 	}()
+
+// 	return nil
+// }
+
+// func getDialector(dialect string, dsn string) gorm.Dialector {
+// 	var dialector gorm.Dialector
+
+// 	switch dialect {
+// 	case "mysql":
+// 		dialector = mysql.Open(dsn)
+// 	case "postgres":
+// 		dialector = postgres.Open(dsn)
+// 	case "sqlite":
+// 		dialector = sqlite.Open(dsn)
+// 	case "sqlserver":
+// 		dialector = sqlserver.Open(dsn)
+// 	default:
+// 		log.Fatal("Unsupported dialect")
+// 	}
+
+// 	return dialector
+// }
+
+// func getDB() *gorm.DB {
+// 	dialector := getDialector(dialect, dsn)
+// 	db, err := gorm.Open(dialector, &gorm.Config{
+// 		PrepareStmt: true,
+// 		Logger: logger.New(
+// 			log.New(os.Stdout, "\r\n", log.LstdFlags), // io writer
+// 			logger.Config{
+// 				SlowThreshold:             10 * time.Second, // Slow SQL threshold
+// 				LogLevel:                  logger.Silent,    // Log level
+// 				IgnoreRecordNotFoundError: true,             // Ignore ErrRecordNotFound error for logger
+// 				Colorful:                  false,            // Disable color
+// 			},
+// 		),
+// 	})
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+// 	//db = db.Debug()
+
+// 	sqlDB, err := db.DB()
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+
+// 	sqlDB.SetMaxIdleConns(sharding)
+// 	sqlDB.SetMaxOpenConns(sharding)
+// 	sqlDB.SetConnMaxLifetime(-1)
+
+// 	return db
+// }
+
+// func checkCmdParams(totalCount int) {
+// 	if totalCount == 0 {
+// 		log.Fatal("no data to export")
+// 	}
+// 	if sharding <= 0 {
+// 		sharding = 1
+// 	}
+// 	if sharding > totalCount {
+// 		sharding = totalCount
+// 	}
+// 	if isBlank(tableName) {
+// 		log.Fatal("tableName is required")
+// 	}
+// 	if isBlank(dialect) {
+// 		log.Fatal("dialect is required")
+// 	}
+// 	if isBlank(dsn) {
+// 		log.Fatal("dsn is required")
+// 	}
+// 	if isBlank(csvFileName) {
+// 		csvFileName = tableName + ".csv"
+// 	}
+// }
+
+// func isBlank(s string) bool {
+// 	return strings.TrimSpace(s) == ""
+// }
+
+// func isOldVersionSqlserver(db *gorm.DB) bool {
+// 	if db.Dialector.Name() == "sqlserver" {
+// 		var v string
+// 		sqlDB, _ := db.DB()
+// 		sqlDB.QueryRow("select @@version").Scan(&v)
+// 		re := regexp.MustCompile(`(\d+).\d+.\d+\.\d+`)
+// 		args := re.FindStringSubmatch(v)
+// 		majorVer, _ := strconv.Atoi(args[1])
+// 		return majorVer <= 10
+// 	}
+// 	return false
+// }
+
 package main
 
 import (
-	"encoding/csv"
-	"flag"
-	"fmt"
-	"github.com/gosuri/uiprogress"
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
-	"gorm.io/driver/sqlserver"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-	"log"
-	"os"
-	"regexp"
-	"runtime"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
+	"net/http"
 )
 
-var (
-	sharding    int
-	tableName   string
-	csvFileName string
-	dialect     string
-	dsn         string
-	withHead    bool
-)
-
-var mtx sync.RWMutex
-
-func init() {
-	flag.IntVar(&sharding, "sharding", 1, "sharding count that may speed up export progress")
-	flag.StringVar(&tableName, "tableName", "", "table name")
-	flag.StringVar(&csvFileName, "csvFileName", "", "exported csv file name")
-	flag.StringVar(&dialect, "dialect", "", "db dialect(mysql, sqlserver, postgres, sqlite are supported for now)")
-	flag.StringVar(&dsn, "dsn", "", "db dsn")
-	flag.BoolVar(&withHead, "withHead", true, "with csv head")
-}
+//type Product struct {
+//	gorm.Model
+//	Code  string
+//	Price uint
+//}
 
 func main() {
-	flag.Parse()
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	//db := getDB()
+	//fmt.Println("111111")
+	//db.AutoMigrate(&Product{})
+	//db.Create(&Product{Code: "D42", Price: 100})
 
-	var totalCount int
-	db := getDB()
-	db.Raw(fmt.Sprintf("select count(*) from %s", tableName)).Scan(&totalCount)
-
-	checkCmdParams(totalCount)
-
-	f, err := os.OpenFile(csvFileName, os.O_CREATE|os.O_WRONLY, os.ModePerm)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() {
-		f.Close()
-		sqlDB, _ := db.DB()
-		sqlDB.Close()
-	}()
-
-	if isOldVersionSqlserver(db) {
-		sharding = 1
-	}
-
-	var wg = new(sync.WaitGroup)
-	wg.Add(sharding)
-
-	uiprogress.Start()
-
-	//100 =>33,33,34 =>0-32,33-65,66-99
-	shardingSize := totalCount / sharding
-	for i := 0; i < sharding; i++ {
-		min := i * shardingSize
-		max := min + shardingSize - 1
-		if i == sharding-1 {
-			max = totalCount - 1
-		}
-
-		go func(i int) {
-			t := NewExportThread(f, db, min, max, wg, fmt.Sprintf("thread-%d", i))
-			t.WriteCSV()
-		}(i)
-	}
-
-	wg.Wait()
-	uiprogress.Stop()
-}
-
-type ExportThread struct {
-	w          *csv.Writer
-	db         *gorm.DB
-	min        int
-	max        int
-	wg         *sync.WaitGroup
-	threadName string
-}
-
-func NewExportThread(f *os.File, db *gorm.DB, min int, max int, wg *sync.WaitGroup, threadName string) *ExportThread {
-	return &ExportThread{csv.NewWriter(f), db, min, max, wg, threadName}
-}
-
-func (t *ExportThread) WriteCSV() error {
-	defer t.wg.Done()
-
-	db := t.db.Table(tableName)
-	if !isOldVersionSqlserver(db) {
-		db = db.Offset(t.min).Limit(t.max - t.min + 1)
-	}
-
-	rows, err := db.Rows()
-	if err != nil {
-		return err
-	}
-
-	mtx.Lock()
-	if withHead {
-		columns, err := rows.Columns()
-		if err != nil {
-			return err
-		}
-		if err := t.w.Write(columns); err != nil {
-			return err
-		}
-		t.w.Flush()
-		withHead = false
-	}
-	mtx.Unlock()
-
-	defer func() {
-		rows.Close()
-	}()
-
-	columns, err := rows.Columns()
-	if err != nil {
-		return err
-	}
-
-	//values := make([]interface{}, len(columns))
-	//
-	//for i := range values {
-	//	var a string
-	//	values[i] = &a
-	//}
-	//
-	//i := 1
-	//
-	//for rows.Next() {
-	//	record := make([]string, len(columns))
-	//	rows.Scan(values...)
-	//
-	//	for i, value := range values {
-	//		record[i] = *value.(*string)
-	//	}
-	//
-	//	t.w.Write(record)
-	//
-	//	if i%1000 == 0 {
-	//		t.w.Flush()
-	//	}
-	//	i++
+	//r := redis.NewClient(&redis.Options{
+	//	Addr:     "127.0.0.1:6379",
+	//	Password: "123qwe",
+	//	DB:       1,
+	//})
+	//r := redis.NewClusterClient(&redis.ClusterOptions{
+	//	Addrs: []string{"redis-cluster.kube-ops:6379"},
+	//	//Password: "123qwe",
+	//})
+	//if err := r.Ping().Err(); err != nil {
+	//	panic(fmt.Sprintf("Init redis database connection error: %s", err.Error()))
 	//}
 
-	rawResult := make([][]byte, len(columns))
-	result := make([]string, len(columns))
-
-	dest := make([]interface{}, len(columns))
-	for i := range rawResult {
-		dest[i] = &rawResult[i]
-	}
-
-	total := t.max - t.min + 1
-	bar := uiprogress.AddBar(total).AppendCompleted().PrependElapsed()
-	bar.PrependFunc(func(b *uiprogress.Bar) string {
-		return fmt.Sprintf("[%s] (%d/%d)", t.threadName, b.Current(), total)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("hello,world!!!!!"))
 	})
 
-	for i := 1; rows.Next(); i++ {
-		rows.Scan(dest...)
-		for i, raw := range rawResult {
-			if raw == nil {
-				result[i] = ""
-			} else {
-				result[i] = string(raw)
-			}
-		}
-		t.w.Write(result)
-		bar.Incr()
+	//http.HandleFunc("/db", func(w http.ResponseWriter, r *http.Request) {
+	//	var product Product
+	//	db.First(&product, 1)
+	//	log.Println(product)
+	//
+	//	b, _ := json.Marshal(product)
+	//	w.Write(b)
+	//})
 
-		if i%1000 == 0 {
-			t.w.Flush()
-			if err := t.w.Error(); err != nil {
-				log.Fatal(err)
-			}
-		}
-	}
+	//http.HandleFunc("/redis", func(w http.ResponseWriter, req *http.Request) {
+	//	r.Set("name", "guobin", time.Second*300)
+	//	b, _ := r.Get("name").Bytes()
+	//	w.Write(b)
+	//})
 
-	defer func() {
-		t.w.Flush()
-	}()
-
-	return nil
+	http.ListenAndServe(":3002", nil)
 }
 
-func getDialector(dialect string, dsn string) gorm.Dialector {
-	var dialector gorm.Dialector
-
-	switch dialect {
-	case "mysql":
-		dialector = mysql.Open(dsn)
-	case "postgres":
-		dialector = postgres.Open(dsn)
-	case "sqlite":
-		dialector = sqlite.Open(dsn)
-	case "sqlserver":
-		dialector = sqlserver.Open(dsn)
-	default:
-		log.Fatal("Unsupported dialect")
-	}
-
-	return dialector
-}
-
-func getDB() *gorm.DB {
-	dialector := getDialector(dialect, dsn)
-	db, err := gorm.Open(dialector, &gorm.Config{
-		PrepareStmt: true,
-		Logger: logger.New(
-			log.New(os.Stdout, "\r\n", log.LstdFlags), // io writer
-			logger.Config{
-				SlowThreshold:             10 * time.Second, // Slow SQL threshold
-				LogLevel:                  logger.Silent,    // Log level
-				IgnoreRecordNotFoundError: true,             // Ignore ErrRecordNotFound error for logger
-				Colorful:                  false,            // Disable color
-			},
-		),
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	//db = db.Debug()
-
-	sqlDB, err := db.DB()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	sqlDB.SetMaxIdleConns(sharding)
-	sqlDB.SetMaxOpenConns(sharding)
-	sqlDB.SetConnMaxLifetime(-1)
-
-	return db
-}
-
-func checkCmdParams(totalCount int) {
-	if totalCount == 0 {
-		log.Fatal("no data to export")
-	}
-	if sharding <= 0 {
-		sharding = 1
-	}
-	if sharding > totalCount {
-		sharding = totalCount
-	}
-	if isBlank(tableName) {
-		log.Fatal("tableName is required")
-	}
-	if isBlank(dialect) {
-		log.Fatal("dialect is required")
-	}
-	if isBlank(dsn) {
-		log.Fatal("dsn is required")
-	}
-	if isBlank(csvFileName) {
-		csvFileName = tableName + ".csv"
-	}
-}
-
-func isBlank(s string) bool {
-	return strings.TrimSpace(s) == ""
-}
-
-func isOldVersionSqlserver(db *gorm.DB) bool {
-	if db.Dialector.Name() == "sqlserver" {
-		var v string
-		sqlDB, _ := db.DB()
-		sqlDB.QueryRow("select @@version").Scan(&v)
-		re := regexp.MustCompile(`(\d+).\d+.\d+\.\d+`)
-		args := re.FindStringSubmatch(v)
-		majorVer, _ := strconv.Atoi(args[1])
-		return majorVer <= 10
-	}
-	return false
-}
+//func getDB() *gorm.DB {
+//	dsn := "root:111111*@tcp(localhost:3306)/test?charset=utf8mb4&parseTime=True&loc=Local" //kubernetes
+//	//dsn := "root:1111111111Aa*@tcp(mysql.kube-ops:3306)/test?charset=utf8mb4&parseTime=True&loc=Local" //kubernetes
+//	//dsn := "root:111111@tcp(host.docker.internal:3306)/test?charset=utf8mb4&parseTime=True&loc=Local" //docker
+//	//dsn := "root:111111@tcp(127.0.0.1:3306)/test?charset=utf8mb4&parseTime=True&loc=Local" //host
+//
+//
+//	//dsn := "skc:99SKC*&566kc88@(tidb.coupon-db:4000)/lan?charset=utf8mb4&parseTime=True&loc=Local" //kubernetes
+//
+//	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+//	if err != nil {
+//		log.Fatal("failed to connect database")
+//	}
+//	return db
+//}
